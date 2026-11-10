@@ -9,7 +9,7 @@
 <title>Reply</title>
 <style>
   :root{color-scheme:light dark}
-  body{font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;max-width:640px;margin:0 auto;padding:24px;line-height:1.5}
+  body{font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;max-width:680px;margin:0 auto;padding:24px;line-height:1.5}
   .card{border:1px solid color-mix(in srgb,CanvasText 15%,transparent);border-radius:12px;padding:20px 24px;margin-top:24px}
   .lane{font-size:12px;letter-spacing:.08em;text-transform:uppercase;opacity:.6}
   h1{font-size:20px;margin:.3em 0}
@@ -17,6 +17,13 @@
   textarea,input[type=text]{width:100%;box-sizing:border-box;padding:10px;border-radius:8px;border:1px solid color-mix(in srgb,CanvasText 25%,transparent);background:transparent;color:inherit;font:inherit;margin-top:6px}
   textarea{min-height:120px}
   label{font-size:13px;font-weight:600;display:block;margin-top:16px}
+  .q{border:1px solid color-mix(in srgb,CanvasText 15%,transparent);border-radius:10px;margin-top:16px;overflow:hidden}
+  .q .qt{padding:12px 14px;font-weight:600}
+  .q .qn{display:inline-block;font-size:12px;letter-spacing:.06em;opacity:.65;margin-right:8px}
+  .q .qa{background:color-mix(in srgb,#f5d90a 22%,transparent);border-top:1px solid color-mix(in srgb,#b59f00 45%,transparent);padding:10px 14px 14px}
+  .q .qa span{font-size:12px;font-weight:700;letter-spacing:.06em;text-transform:uppercase}
+  .q textarea{min-height:64px;background:Canvas}
+  .count{font-size:13px;opacity:.7;margin-top:14px}
   button{margin-top:18px;padding:10px 22px;border-radius:8px;border:none;background:#3ecf8e;color:#04150c;font-weight:700;font-size:15px;cursor:pointer}
   button:disabled{opacity:.5;cursor:default}
   .ok{padding:14px;border-radius:8px;background:color-mix(in srgb,#3ecf8e 18%,transparent);margin-top:20px}
@@ -42,6 +49,24 @@
   function show() { card.replaceChildren.apply(card, arguments); }
   function fail(msg) { show(el("h1", null, "Link not found"), el("p", null, msg || "This link is invalid or was removed.")); }
 
+  // Drafts stay in this browser only, so a half-finished reply survives a reload.
+  var DKEY = "lifeos-draft-" + token.slice(0, 12);
+  function loadDraft() { try { return JSON.parse(localStorage.getItem(DKEY) || "{}") || {}; } catch (e) { return {}; } }
+  function saveDraft(d) { try { localStorage.setItem(DKEY, JSON.stringify(d)); } catch (e) {} }
+  function clearDraft() { try { localStorage.removeItem(DKEY); } catch (e) {} }
+
+  // A question text with two or more lines starting "Q1.", "Q2." ... is shown as one answer box per question.
+  function parseQuestions(text) {
+    var lines = String(text || "").split(/\r?\n/), intro = [], qs = [], cur = null;
+    for (var i = 0; i < lines.length; i++) {
+      var m = /^\s*(Q\d+)[.):]\s*(.*)$/.exec(lines[i]);
+      if (m) { cur = { n: m[1], text: m[2] }; qs.push(cur); }
+      else if (cur) { if (lines[i].trim()) cur.text += "\n" + lines[i]; }
+      else intro.push(lines[i]);
+    }
+    return { intro: intro.join("\n").trim(), qs: qs };
+  }
+
   if (!/^[0-9a-f]{48}$/.test(token)) { fail(); return; }
 
   fetch(API + "?t=" + token, { headers: { accept: "application/json" } })
@@ -53,24 +78,75 @@
         show(el("h1", null, s.task_title), el("p", null, "This request is " + s.status + " and no longer accepts replies. Thank you."));
         return;
       }
+      var parsed = parseQuestions(s.question);
+      var multi = parsed.qs.length >= 2;
       var nodes = [
         el("div", { "class": "lane" }, s.lane + " · LifeOS"),
-        el("h1", null, s.task_title),
-        el("p", { style: "white-space:pre-wrap" }, s.question)
+        el("h1", null, s.task_title)
       ];
+      if (!multi) nodes.push(el("p", { style: "white-space:pre-wrap" }, s.question));
+      else if (parsed.intro) nodes.push(el("p", { style: "white-space:pre-wrap" }, parsed.intro));
       if (s.context_note) nodes.push(el("p", { "class": "ctx" }, s.context_note));
       if (s.status === "replied" && !s.allow_multiple_replies) {
         nodes.push(el("p", { "class": "ok" }, "A reply was already received. Thank you."));
         show.apply(null, nodes); return;
       }
-      var lab1 = el("label", null, "Your answer");
-      var ta = el("textarea", { maxlength: "8000", placeholder: "Type your reply here" });
-      var lab2 = el("label", null, "Your name (optional)");
-      var name = el("input", { type: "text", maxlength: "120" });
-      var btn = el("button", { type: "button" }, "Send reply");
+      if (s.status === "replied") nodes.push(el("p", { "class": "ok" }, "A reply was already received. You can send more answers or a correction below."));
+
+      var draft = loadDraft();
+      var boxes = [];   // { n, ta }
+      var counter = el("div", { "class": "count" });
+      function updateCount() {
+        if (!multi) return;
+        var done = boxes.filter(function (b) { return b.n !== "Other" && b.ta.value.trim(); }).length;
+        counter.textContent = done + " of " + parsed.qs.length + " answered. You can send now and answer the rest later.";
+      }
+      function addBox(n, labelText, placeholder) {
+        var wrap = el("div", { "class": "q" });
+        var qt = el("div", { "class": "qt" });
+        if (n !== "Other") qt.appendChild(el("span", { "class": "qn" }, n));
+        qt.appendChild(document.createTextNode(labelText));
+        qt.style.whiteSpace = "pre-wrap";
+        var qa = el("div", { "class": "qa" });
+        var id = "ans-" + n;
+        var lab = el("label", { "for": id, style: "margin-top:0" });
+        lab.appendChild(el("span", null, "Answer"));
+        var ta = el("textarea", { id: id, maxlength: "1000", placeholder: placeholder });
+        if (draft[n]) ta.value = draft[n];
+        ta.addEventListener("input", function () { draft[n] = ta.value; saveDraft(draft); updateCount(); });
+        qa.appendChild(lab); qa.appendChild(ta);
+        wrap.appendChild(qt); wrap.appendChild(qa);
+        boxes.push({ n: n, ta: ta });
+        return wrap;
+      }
+
+      var ta = null;
+      if (multi) {
+        parsed.qs.forEach(function (q) { nodes.push(addBox(q.n, q.text, "Type your answer to " + q.n)); });
+        nodes.push(addBox("Other", "Anything else you want raised", "Optional"));
+        nodes.push(counter);
+      } else {
+        var lab1 = el("label", { "for": "ans-single" }, "Your answer");
+        ta = el("textarea", { id: "ans-single", maxlength: "8000", placeholder: "Type your reply here" });
+        if (draft.single) ta.value = draft.single;
+        ta.addEventListener("input", function () { draft.single = ta.value; saveDraft(draft); });
+        nodes.push(lab1, ta);
+      }
+      var lab2 = el("label", { "for": "ans-name" }, "Your name (optional)");
+      var name = el("input", { type: "text", maxlength: "120", id: "ans-name" });
+      var btn = el("button", { type: "button" }, multi ? "Send my answers" : "Send reply");
+      var btnText = btn.textContent;
+
       btn.addEventListener("click", function () {
-        var reply = ta.value.trim();
-        if (!reply) { ta.focus(); return; }
+        var reply;
+        if (multi) {
+          reply = boxes.filter(function (b) { return b.ta.value.trim(); })
+            .map(function (b) { return b.n + ": " + b.ta.value.trim(); }).join("\n\n");
+          if (!reply) { boxes[0].ta.focus(); return; }
+        } else {
+          reply = ta.value.trim();
+          if (!reply) { ta.focus(); return; }
+        }
         btn.disabled = true; btn.textContent = "Sending…";
         fetch(API, {
           method: "POST",
@@ -78,19 +154,22 @@
           body: JSON.stringify({ t: token, reply: reply, author: name.value.trim() })
         }).then(function (r) { return r.json(); }).then(function (res) {
           if (res && res.ok) {
+            clearDraft();
             show(el("h1", null, s.task_title),
-                 el("p", { "class": "ok" }, "Reply received — thank you" + (name.value.trim() ? ", " + name.value.trim() : "") + ". David's assistant will pick it up on the next run and the task moves forward."));
+                 el("p", { "class": "ok" }, "Reply received — thank you" + (name.value.trim() ? ", " + name.value.trim() : "") + ". David's assistant will pick it up on the next run and the task moves forward."),
+                 el("p", { "class": "ctx" }, reply));
           } else {
-            btn.disabled = false; btn.textContent = "Send reply";
+            btn.disabled = false; btn.textContent = btnText;
             card.appendChild(el("p", { "class": "err" }, (res && res.reason) === "no longer accepting replies" ? "This request no longer accepts replies." : "Something went wrong — please try again."));
           }
         }).catch(function () {
-          btn.disabled = false; btn.textContent = "Send reply";
+          btn.disabled = false; btn.textContent = btnText;
           card.appendChild(el("p", { "class": "err" }, "Network problem — please try again."));
         });
       });
-      nodes.push(lab1, ta, lab2, name, btn);
+      nodes.push(lab2, name, btn);
       show.apply(null, nodes);
+      updateCount();
     })
     .catch(function () { fail("Could not load this request — please try again."); });
 })();
